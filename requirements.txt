@@ -1,0 +1,5 @@
+openai==1.3.7
+python-dotenv
+emoji
+
+
