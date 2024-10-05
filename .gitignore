@@ -1,4 +1,7 @@
 credentials.env
+.ipynb_aml_checkpoints/ 
+*.amltmp 
+*.amltemp
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
