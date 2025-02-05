@@ -3,13 +3,17 @@ import logging
 import json
 import os
 import datetime
-import time
+from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas, BlobClient
+from openai import AzureOpenAI
+import fitz
+import urllib.parse
+
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 @app.route(route="extracttomarkdown")
 def extracttomarkdown(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Invoked FormRecognizer Skill.')
+    logging.info('Invoked GPT4o Skill.')
     try:
         body = json.dumps(req.get_json())
 
@@ -23,11 +27,13 @@ def extracttomarkdown(req: func.HttpRequest) -> func.HttpResponse:
                 "Invalid body",
                 status_code=400
             )
-    except ValueError:
+    except ValueError as e:
         return func.HttpResponse(
-             "Invalid body",
+             "Invalid body: " + str(e),
              status_code=400
         )
+        
+
 
 def compose_response(json_data):
     values = json.loads(json_data)['values']
@@ -35,33 +41,156 @@ def compose_response(json_data):
     # Prepare the Output before the loop
     results = {}
     results["values"] = []
-    endpoint = os.environ["OPENAI_API_ENDPOINT"]
-    key = os.environ["OPENAI_API_KEY"]
+    blob_connection_string = os.environ["BLOB_STORAGE_ACCOUNT_CONNECTION_STRING"]
     
     for value in values:
-        images = pdf2images(value)
-        markdown_output = generate_markdown(images)
-        results["values"].append(markdown_output)
+        try:
+            logging.info("Next Doc")
+            url = value["data"]["docUrl"]+value["data"]["docSAS"]
+            logging.info("url")
+            chunks = pdf2chunks(value["recordId"], url, blob_connection_string)  
+        except NameError as error:
+            chunks = {
+                "recordId": value["recordId"],
+                "errors": [ { "message": "Error:" + str(error) }   ]       
+            }     
+        results["values"].append(chunks)
 
     return json.dumps(results, ensure_ascii=False, cls=DateTimeEncoder)
+
+
     
-def pdf2images(file):
-    return ""
+def pdf2chunks(record_id, pdf_url, blob_connection_string):
+    
+    # Create a BlobClient using the URL
+    
+    blob_client = BlobClient.from_blob_url(pdf_url)
+    pdf_bytes = blob_client.download_blob().readall()
+    pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    
+    chunks = []
+    previous_page = ""
 
+    for page_num in range(len(pdf_document)):
+        logging.info("Next Page")
+        page = pdf_document.load_page(page_num)
+        pix = page.get_pixmap()
+        
+        parsed_url = urllib.parse.urlparse(pdf_url)
+        pdf_name = os.path.basename(parsed_url.path).replace(".pdf", "")
 
-def generate_markdown(images):
-    markdown = """
-# Example Markdown
+        
+        # Upload to Azure Blob Storage
+        blob_service_client = BlobServiceClient.from_connection_string(blob_connection_string)
+        container_client = blob_service_client.get_container_client("customskillimages")
+        
+        if not container_client.exists():
+            container_client.create_container()
+            
+        
+        blob_client = container_client.get_blob_client(blob=f'{pdf_name}/page{page_num}.jpg')
+        image_bytes = pix.tobytes("jpg")
+        blob_client.upload_blob(image_bytes, overwrite=True)
+        
+        account_key = get_account_key_from_connection_string(blob_connection_string)
+        sas_token = generate_blob_sas(
+            account_key=account_key,
+            account_name=blob_service_client.account_name,
+            container_name=container_client.container_name,
+            blob_name=blob_client.blob_name,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30))
+        
+        image_url = f"{blob_client.url}?{sas_token}"
+        
+        # Extract Markdown for the page.
+        markdown = generate_markdown(image_url)
+        
+        # Ensure the markdown starts with "Page " followed by a number
+        if not markdown.startswith("Page ") or not markdown.split('\n')[0].replace("Page ", "").strip().isdigit():
+            raise ValueError("Markdown does not start with 'Page ' followed by a number")
+        
+        page_number = markdown.split('\n')[0].replace("Page ", "").strip()
+        
+        # Combine consecutive pages so we have chunk overlap.
+        chunk = previous_page + markdown
+        previous_page = markdown
+        
+        chunk_record = {
+            "page_number": page_number,
+            "markdown": chunk
+        }
+        
+        chunks.append(chunk_record)
+        
+    chunk_record = {
+        "recordId": record_id,
+        "data": {
+            "markdown_chunks": chunks
+        }   
+    }
+    
+    return chunk_record
 
-## Table
+# Function to extract account key from connection string
+def get_account_key_from_connection_string(connection_string):
+    parts = connection_string.split(';')
+    for part in parts:
+        if part.startswith('AccountKey='):
+            return part[len('AccountKey='):]
+    return None
 
-| Column 1 | Column 2 | Column 3 |
-|----------|----------|----------|
-| Value 1  | Value 2  | Value 3  |
-| Value 4  | Value 5  | Value 6  |
-| Value 7  | Value 8  | Value 9  |
-"""
-    return markdown
+def generate_markdown(image_url):
+    """
+    Gpt-4o model
+    """
+    
+    system_prompt = """
+    You are an AI assistance that extracts text from the image. You are especially good at extracting tables.
+    Start your response with the page number of the image. 
+    Example Page:
+    
+    Page 123
+    
+    Monthly Savings
+    | Month    | Savings |Details      |
+    | -------- | ------- |------------ |
+    | January  | $250    | for holiday |
+    | February | $80     | pension     |
+    | March    | $420    | new cat     |
+    
+    Savings were significantly lower in February. This is surprising because it is a short month and contributing to pension shuld be a priority.
+    """
+    
+    client = AzureOpenAI(
+        azure_endpoint=os.environ['OPENAI_API_ENDPOINT'],
+        api_key=os.environ['OPENAI_API_KEY'],
+        api_version='2023-05-15',
+        )
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extract text from the image"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
+                    },
+                ],
+            },
+        ],
+        max_tokens=2000,
+        temperature=0.0,
+    )
+    
+    return response.choices[0].message.content
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -69,3 +198,5 @@ class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, (datetime.date, datetime.datetime)):
             return obj.isoformat()
+        
+        
