@@ -1,4 +1,5 @@
 .vscode
+data
 credentials.env
 .ipynb_aml_checkpoints/ 
 *.amltmp 
