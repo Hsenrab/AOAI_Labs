@@ -16,10 +16,10 @@ def divide(req: func.HttpRequest) -> func.HttpResponse:
             new_values = []
             for value in values:
                 logging.info(value)
-                input_value = value['data']['input']
+                input_value = value['data']['function_name_input']
                 new_values.append({
                     "recordId": value['recordId'],
-                    "data": {"new_list": [
+                    "data": {"function_name_new_list": [
                         {
                             "item": input_value+"_new_1"
                         },
@@ -64,12 +64,12 @@ def onetoone(req: func.HttpRequest) -> func.HttpResponse:
             new_values = []
             for value in values:
                 logging.info(value)
-                input_value = value['data']['input']
+                input_value = value['data']['function_name_input']
                 new_values.append({
                     "recordId": value['recordId'],
-                    "data": {"new_field": input_value+"_new"},
+                    "data": {"function_name_new_field": input_value+"_new"},
                     "errors": None,
-                    "warnings": None
+                    "warnings": [{"message": "some warning message"}]
                 })
             output = {}   
             output["values"] = new_values
