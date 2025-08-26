@@ -171,3 +171,6 @@ cython_debug/
 *.amltmp 
 *.amltemp
 .amlignore
+AzureAISearchLab/genai-extract-from-pdf/local.settings.json
+.gitignore
+AzureAISearchLab/mapping-example/local.settings.json
